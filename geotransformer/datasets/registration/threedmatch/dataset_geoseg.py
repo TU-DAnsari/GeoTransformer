@@ -13,6 +13,7 @@ from geotransformer.utils.pointcloud import (
     get_transform_from_rotation_translation,
 )
 from geotransformer.utils.registration import get_correspondences
+from scipy.spatial import cKDTree
 import open3d as o3d
 
 
@@ -30,12 +31,15 @@ class GeoSegDataset(torch.utils.data.Dataset):
         return_corr_indices=False,
         matching_radius=None,
         rotated=False,
+        seed=42,
     ):
         super(GeoSegDataset, self).__init__()
 
         self.dataset_root = dataset_root
         self.metadata_root = osp.join(self.dataset_root, 'metadata')
         self.data_root = osp.join(self.dataset_root, 'data')
+        self.sampler = np.random.default_rng(seed=seed)
+
 
         self.subset = subset
         self.point_limit = point_limit
@@ -59,6 +63,11 @@ class GeoSegDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.metadata_list)
+
+    def _get_patch(self, points, query, radius):
+        tree = cKDTree(points)
+        indices_list = tree.query_ball_point(query, radius)[0]
+        return points[indices_list]
 
     def _load_point_cloud(self, file_name):
         points = torch.load(osp.join(self.data_root, file_name), weights_only=False)
@@ -103,18 +112,16 @@ class GeoSegDataset(torch.utils.data.Dataset):
         # metadata
         metadata: Dict = self.metadata_list[index]
         data_dict['scene_name'] = metadata['scene_name']
-        data_dict['ref_frame'] = metadata['frag_id0']
-        data_dict['src_frame'] = metadata['frag_id1']
-        data_dict['overlap'] = metadata['overlap']
 
         # get transformation
-        rotation = metadata['rotation']
-        translation = metadata['translation']
+        rotation = np.eye(3)
+        translation = np.zeros(3)
 
         # get point cloud
         ref_points = self._load_point_cloud(metadata['pcd0'])
-        src_points = self._load_point_cloud(metadata['pcd1'])
-
+        seed_point_idx = self.sampler.choice(ref_points.shape[0], 1)
+        src_points = self._get_patch(ref_points, ref_points[seed_point_idx], 1.0)
+             
         # augmentation
         if self.use_augmentation:
             ref_points, src_points, rotation, translation = self._augment_point_cloud(
@@ -133,13 +140,9 @@ class GeoSegDataset(torch.utils.data.Dataset):
 
         transform = get_transform_from_rotation_translation(rotation, translation)
 
-        corr_indices = get_correspondences(ref_points, src_points, transform, self.matching_radius)
-        ref_corr_indices = corr_indices[:, 0]
-        ref_corr_indices_unique = np.unique(ref_corr_indices)
-
-        data_dict['ref_points'] = ref_points[ref_corr_indices_unique].astype(np.float32)
+        data_dict['ref_points'] = ref_points.astype(np.float32)
         data_dict['src_points'] = src_points.astype(np.float32)
-        data_dict['ref_feats'] = np.ones((ref_corr_indices_unique.shape[0], 1), dtype=np.float32)
+        data_dict['ref_feats'] = np.ones((ref_points.shape[0], 1), dtype=np.float32)
         data_dict['src_feats'] = np.ones((src_points.shape[0], 1), dtype=np.float32)
         data_dict['transform'] = transform.astype(np.float32)
 
