@@ -66,8 +66,8 @@ class GeoSegDataset(torch.utils.data.Dataset):
 
     def _get_patch(self, points, query, radius):
         tree = cKDTree(points)
-        indices_list = tree.query_ball_point(query, radius)[0]
-        return points[indices_list]
+        _, idx = tree.query(query, radius)
+        return points[idx[0]]
 
     def _load_point_cloud(self, file_name):
         points = torch.load(osp.join(self.data_root, file_name), weights_only=False)
@@ -119,8 +119,9 @@ class GeoSegDataset(torch.utils.data.Dataset):
 
         # get point cloud
         ref_points = self._load_point_cloud(metadata['pcd0'])
+        n_points_sub = ref_points.shape[0] // 5
         seed_point_idx = self.sampler.choice(ref_points.shape[0], 1)
-        src_points = self._get_patch(ref_points, ref_points[seed_point_idx], 1.0)
+        src_points = self._get_patch(ref_points, ref_points[seed_point_idx], n_points_sub)
              
         # augmentation
         if self.use_augmentation:
