@@ -1,4 +1,6 @@
 from geotransformer.datasets.registration.threedmatch.dataset_geoseg import GeoSegDataset
+from geotransformer.datasets.registration.threedmatch.dataset import ThreeDMatchPairDataset
+
 from geotransformer.utils.data import (
     registration_collate_fn_stack_mode,
     calibrate_neighbors_stack_mode,
@@ -6,11 +8,10 @@ from geotransformer.utils.data import (
 )
 
 def train_valid_data_loader(cfg, distributed):
-    train_dataset = GeoSegDataset(
+    train_dataset = ThreeDMatchPairDataset(
         cfg.data.dataset_root,
         'train',
         point_limit=cfg.train.point_limit,
-        init_voxel_size=cfg.backbone.init_voxel_size,
         use_augmentation=cfg.train.use_augmentation,
         augmentation_noise=cfg.train.augmentation_noise,
         augmentation_rotation=cfg.train.augmentation_rotation,
@@ -36,7 +37,7 @@ def train_valid_data_loader(cfg, distributed):
         distributed=distributed,
     )
 
-    valid_dataset = GeoSegDataset(
+    valid_dataset = ThreeDMatchPairDataset(
         cfg.data.dataset_root,
         'val',
         point_limit=cfg.test.point_limit,
@@ -60,7 +61,7 @@ def train_valid_data_loader(cfg, distributed):
 
 
 def test_data_loader(cfg, benchmark):
-    train_dataset = GeoSegDataset(
+    train_dataset = ThreeDMatchPairDataset(
         cfg.data.dataset_root,
         'train',
         point_limit=cfg.train.point_limit,
@@ -77,7 +78,7 @@ def test_data_loader(cfg, benchmark):
         cfg.backbone.init_radius,
     )
 
-    test_dataset = GeoSegDataset(
+    test_dataset = ThreeDMatchPairDataset(
         cfg.data.dataset_root,
         benchmark,
         point_limit=cfg.test.point_limit,

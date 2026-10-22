@@ -3,8 +3,47 @@ import torch.nn as nn
 
 from geotransformer.modules.loss import WeightedCircleLoss
 from geotransformer.modules.ops.transformation import apply_transform
-from geotransformer.modules.registration.metrics import isotropic_transform_error
 from geotransformer.modules.ops.pairwise_distance import pairwise_distance
+
+
+def compute_segmentation_labels(points, other_points, radius, chunk_size=4096):
+    r"""A point is positive if its nearest neighbor in `other_points` is within `radius`.
+
+    Both point clouds must be in the same frame. Chunked to bound memory on large scenes.
+
+    Args:
+        points (Tensor): (N, 3)
+        other_points (Tensor): (M, 3)
+
+    Returns:
+        labels (BoolTensor): (N,)
+    """
+    labels = []
+    for i in range(0, points.shape[0], chunk_size):
+        sq_dists = pairwise_distance(points[i : i + chunk_size], other_points)  # (n, M)
+        labels.append(torch.lt(sq_dists.min(dim=1)[0], radius ** 2))
+    return torch.cat(labels, dim=0)
+
+
+def compute_segmentation_metrics(probs, labels, threshold=0.5):
+    r"""Binary segmentation metrics of per-point matching probabilities against ground-truth labels.
+
+    Args:
+        probs (Tensor): (N,)
+        labels (BoolTensor): (N,)
+
+    Returns:
+        precision, recall, f1, iou (Tensor): scalars, 0 when undefined.
+    """
+    preds = torch.gt(probs, threshold)
+    tp = torch.logical_and(preds, labels).sum().float()
+    fp = torch.logical_and(preds, ~labels).sum().float()
+    fn = torch.logical_and(~preds, labels).sum().float()
+    precision = tp / (tp + fp).clamp(min=1.0)
+    recall = tp / (tp + fn).clamp(min=1.0)
+    f1 = 2.0 * tp / (2.0 * tp + fp + fn).clamp(min=1.0)
+    iou = tp / (tp + fp + fn).clamp(min=1.0)
+    return precision, recall, f1, iou
 
 
 class CoarseMatchingLoss(nn.Module):
@@ -96,8 +135,8 @@ class Evaluator(nn.Module):
     def __init__(self, cfg):
         super(Evaluator, self).__init__()
         self.acceptance_overlap = cfg.eval.acceptance_overlap
-        self.acceptance_radius = cfg.eval.acceptance_radius
-        self.acceptance_rmse = cfg.eval.rmse_threshold
+        self.segmentation_radius = cfg.eval.segmentation_radius
+        self.segmentation_threshold = cfg.eval.segmentation_threshold
 
     @torch.no_grad()
     def evaluate_coarse(self, output_dict):
@@ -120,40 +159,28 @@ class Evaluator(nn.Module):
         return precision
 
     @torch.no_grad()
-    def evaluate_fine(self, output_dict, data_dict):
-        transform = data_dict['transform']
-        ref_corr_points = output_dict['ref_corr_points']
-        src_corr_points = output_dict['src_corr_points']
-        src_corr_points = apply_transform(src_corr_points, transform)
-        corr_distances = torch.linalg.norm(ref_corr_points - src_corr_points, dim=1)
-        precision = torch.lt(corr_distances, self.acceptance_radius).float().mean()
-        return precision
+    def evaluate_segmentation(self, output_dict, data_dict):
+        ref_points_f = output_dict['ref_points_f']
+        src_points_f = apply_transform(output_dict['src_points_f'], data_dict['transform'])
 
-    @torch.no_grad()
-    def evaluate_registration(self, output_dict, data_dict):
-        transform = data_dict['transform']
-        est_transform = output_dict['estimated_transform']
-        src_points = output_dict['src_points']
+        ref_labels = compute_segmentation_labels(ref_points_f, src_points_f, self.segmentation_radius)
+        src_labels = compute_segmentation_labels(src_points_f, ref_points_f, self.segmentation_radius)
 
-        rre, rte = isotropic_transform_error(transform, est_transform)
+        result_dict = {}
+        for prefix, probs, labels in [
+            ('ref', output_dict['ref_match_probs_f'], ref_labels),
+            ('src', output_dict['src_match_probs_f'], src_labels),
+        ]:
+            precision, recall, f1, iou = compute_segmentation_metrics(probs, labels, self.segmentation_threshold)
+            result_dict[f'{prefix}_P'] = precision
+            result_dict[f'{prefix}_R'] = recall
+            result_dict[f'{prefix}_F1'] = f1
+            result_dict[f'{prefix}_IoU'] = iou
 
-        realignment_transform = torch.matmul(torch.inverse(transform), est_transform)
-        realigned_src_points_f = apply_transform(src_points, realignment_transform)
-        rmse = torch.linalg.norm(realigned_src_points_f - src_points, dim=1).mean()
-        recall = torch.lt(rmse, self.acceptance_rmse).float()
-
-        return rre, rte, rmse, recall
+        return result_dict
 
     def forward(self, output_dict, data_dict):
         c_precision = self.evaluate_coarse(output_dict)
-        f_precision = self.evaluate_fine(output_dict, data_dict)
-        rre, rte, rmse, recall = self.evaluate_registration(output_dict, data_dict)
+        result_dict = self.evaluate_segmentation(output_dict, data_dict)
 
-        return {
-            'PIR': c_precision,
-            'IR': f_precision,
-            'RRE': rre,
-            'RTE': rte,
-            'RMSE': rmse,
-            'RR': recall,
-        }
+        return {'PIR': c_precision, **result_dict}

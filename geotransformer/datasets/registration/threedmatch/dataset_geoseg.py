@@ -23,7 +23,6 @@ class GeoSegDataset(torch.utils.data.Dataset):
         dataset_root,
         subset,
         point_limit=None,
-        init_voxel_size=None,
         use_augmentation=False,
         augmentation_noise=0.005,
         augmentation_rotation=1,
@@ -43,7 +42,6 @@ class GeoSegDataset(torch.utils.data.Dataset):
 
         self.subset = subset
         self.point_limit = point_limit
-        self.init_voxel_size = init_voxel_size
         self.overlap_threshold = overlap_threshold
         self.rotated = rotated
 
@@ -72,12 +70,6 @@ class GeoSegDataset(torch.utils.data.Dataset):
     def _load_point_cloud(self, file_name):
         points = torch.load(osp.join(self.data_root, file_name), weights_only=False)
         # NOTE: setting "point_limit" with "num_workers" > 1 will cause nondeterminism.
-
-        # if self.init_voxel_size is not None:
-        #     pcd = o3d.geometry.PointCloud()
-        #     pcd.points = o3d.utility.Vector3dVector(points)
-        #     pcd = pcd.voxel_down_sample(self.init_voxel_size)
-        #     points = np.asarray(pcd.points)
 
         if self.point_limit is not None and points.shape[0] > self.point_limit:
             indices = np.random.permutation(points.shape[0])[: self.point_limit]

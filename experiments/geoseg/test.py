@@ -59,7 +59,6 @@ class Tester(SingleTester):
         src_frame = data_dict['src_frame']
         message = f'{scene_name}, id0: {ref_frame}, id1: {src_frame}'
         message += ', ' + get_log_string(result_dict=result_dict)
-        message += ', nCorr: {}'.format(output_dict['corr_scores'].shape[0])
         return message
 
     def after_test_step(self, iteration, data_dict, output_dict, result_dict):
@@ -81,12 +80,10 @@ class Tester(SingleTester):
             src_feats_c=release_cuda(output_dict['src_feats_c']),
             ref_node_corr_indices=release_cuda(output_dict['ref_node_corr_indices']),
             src_node_corr_indices=release_cuda(output_dict['src_node_corr_indices']),
-            ref_corr_points=release_cuda(output_dict['ref_corr_points']),
-            src_corr_points=release_cuda(output_dict['src_corr_points']),
-            corr_scores=release_cuda(output_dict['corr_scores']),
+            ref_match_probs_f=release_cuda(output_dict['ref_match_probs_f']),
+            src_match_probs_f=release_cuda(output_dict['src_match_probs_f']),
             gt_node_corr_indices=release_cuda(output_dict['gt_node_corr_indices']),
             gt_node_corr_overlaps=release_cuda(output_dict['gt_node_corr_overlaps']),
-            estimated_transform=release_cuda(output_dict['estimated_transform']),
             transform=release_cuda(data_dict['transform']),
             overlap=data_dict['overlap'],
         )

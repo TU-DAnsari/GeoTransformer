@@ -10,7 +10,6 @@ from geotransformer.modules.geotransformer import (
     GeometricTransformer,
     SuperPointMatching,
     SuperPointTargetGenerator,
-    LocalGlobalRegistration,
 )
 
 from backbone import KPConvFPN
@@ -50,18 +49,6 @@ class GeoTransformer(nn.Module):
 
         self.coarse_matching = SuperPointMatching(
             cfg.coarse_matching.num_correspondences, cfg.coarse_matching.dual_normalization
-        )
-
-        self.fine_matching = LocalGlobalRegistration(
-            cfg.fine_matching.topk,
-            cfg.fine_matching.acceptance_radius,
-            mutual=cfg.fine_matching.mutual,
-            confidence_threshold=cfg.fine_matching.confidence_threshold,
-            use_dustbin=cfg.fine_matching.use_dustbin,
-            use_global_score=cfg.fine_matching.use_global_score,
-            correspondence_threshold=cfg.fine_matching.correspondence_threshold,
-            correspondence_limit=cfg.fine_matching.correspondence_limit,
-            num_refinement_steps=cfg.fine_matching.num_refinement_steps,
         )
 
         self.optimal_transport = LearnableLogOptimalTransport(cfg.model.num_sinkhorn_iterations)
@@ -190,24 +177,24 @@ class GeoTransformer(nn.Module):
 
         output_dict['matching_scores'] = matching_scores
 
-        # 9. Generate final correspondences during testing
+        # 9. Per-point matching probability (max over all patch pairs containing the point)
         with torch.no_grad():
-            if not self.fine_matching.use_dustbin:
-                matching_scores = matching_scores[:, :-1, :-1]
+            match_probs = torch.exp(matching_scores)  # (P, K+1, K+1)
+            ref_patch_probs = 1.0 - match_probs[:, :-1, -1]  # (P, K)
+            src_patch_probs = 1.0 - match_probs[:, -1, :-1]  # (P, K)
 
-            ref_corr_points, src_corr_points, corr_scores, estimated_transform = self.fine_matching(
-                ref_node_corr_knn_points,
-                src_node_corr_knn_points,
-                ref_node_corr_knn_masks,
-                src_node_corr_knn_masks,
-                matching_scores,
-                node_corr_scores,
+            # knn indices use ref_length_f / src_length_f as the padding index, hence the +1 slot
+            ref_match_probs = torch.zeros(ref_length_f + 1, device=matching_scores.device)
+            src_match_probs = torch.zeros(src_points_f.shape[0] + 1, device=matching_scores.device)
+            ref_match_probs.scatter_reduce_(
+                0, ref_node_corr_knn_indices.flatten(), ref_patch_probs.flatten(), reduce='amax'
+            )
+            src_match_probs.scatter_reduce_(
+                0, src_node_corr_knn_indices.flatten(), src_patch_probs.flatten(), reduce='amax'
             )
 
-            output_dict['ref_corr_points'] = ref_corr_points
-            output_dict['src_corr_points'] = src_corr_points
-            output_dict['corr_scores'] = corr_scores
-            output_dict['estimated_transform'] = estimated_transform
+            output_dict['ref_match_probs_f'] = ref_match_probs[:-1]  # (N_ref_f,)
+            output_dict['src_match_probs_f'] = src_match_probs[:-1]  # (N_src_f,)
 
         return output_dict
 

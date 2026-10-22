@@ -57,6 +57,8 @@ _C.eval.inlier_ratio_threshold = 0.05
 _C.eval.rmse_threshold = 0.2
 _C.eval.rre_threshold = 15.0
 _C.eval.rte_threshold = 0.3
+_C.eval.segmentation_radius = 0.05  # same as fine_loss.positive_radius, which the dustbin is trained with
+_C.eval.segmentation_threshold = 0.5
 
 # ransac
 _C.ransac = edict()
@@ -111,18 +113,6 @@ _C.geotransformer.sigma_d = 0.2
 _C.geotransformer.sigma_a = 15
 _C.geotransformer.angle_k = 3
 _C.geotransformer.reduction_a = 'max'
-
-# model - Fine Matching
-_C.fine_matching = edict()
-_C.fine_matching.topk = 3
-_C.fine_matching.acceptance_radius = 0.1
-_C.fine_matching.mutual = True
-_C.fine_matching.confidence_threshold = 0.05
-_C.fine_matching.use_dustbin = False
-_C.fine_matching.use_global_score = False
-_C.fine_matching.correspondence_threshold = 3
-_C.fine_matching.correspondence_limit = None
-_C.fine_matching.num_refinement_steps = 5
 
 # loss - Coarse level
 _C.coarse_loss = edict()
