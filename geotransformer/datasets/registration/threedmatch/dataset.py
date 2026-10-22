@@ -58,7 +58,7 @@ class ThreeDMatchPairDataset(torch.utils.data.Dataset):
         return len(self.metadata_list)
 
     def _load_point_cloud(self, file_name):
-        points = torch.load(osp.join(self.data_root, file_name))
+        points = torch.load(osp.join(self.data_root, file_name), weights_only=False)
         # NOTE: setting "point_limit" with "num_workers" > 1 will cause nondeterminism.
         if self.point_limit is not None and points.shape[0] > self.point_limit:
             indices = np.random.permutation(points.shape[0])[: self.point_limit]

@@ -5,7 +5,6 @@ from geotransformer.utils.data import (
     build_dataloader_stack_mode,
 )
 
-
 def train_valid_data_loader(cfg, distributed):
     train_dataset = ThreeDMatchPairDataset(
         cfg.data.dataset_root,
