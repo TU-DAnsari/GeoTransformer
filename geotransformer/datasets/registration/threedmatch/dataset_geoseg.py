@@ -119,7 +119,7 @@ class GeoSegDataset(torch.utils.data.Dataset):
 
         # get point cloud
         ref_points = self._load_point_cloud(metadata['pcd0'])
-        n_points_sub = ref_points.shape[0] // 5
+        n_points_sub = ref_points.shape[0] // 3
         seed_point_idx = self.sampler.choice(ref_points.shape[0], 1)
         src_points = self._get_patch(ref_points, ref_points[seed_point_idx], n_points_sub)
              
