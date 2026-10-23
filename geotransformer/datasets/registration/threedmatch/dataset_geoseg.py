@@ -23,6 +23,7 @@ class GeoSegDataset(torch.utils.data.Dataset):
         dataset_root,
         subset,
         point_limit=None,
+        voxel_size=None,
         use_augmentation=False,
         augmentation_noise=0.005,
         augmentation_rotation=1,
@@ -42,6 +43,7 @@ class GeoSegDataset(torch.utils.data.Dataset):
 
         self.subset = subset
         self.point_limit = point_limit
+        self.voxel_size = voxel_size
         self.overlap_threshold = overlap_threshold
         self.rotated = rotated
 
@@ -71,9 +73,16 @@ class GeoSegDataset(torch.utils.data.Dataset):
         points = torch.load(osp.join(self.data_root, file_name), weights_only=False)
         # NOTE: setting "point_limit" with "num_workers" > 1 will cause nondeterminism.
 
-        if self.point_limit is not None and points.shape[0] > self.point_limit:
-            indices = np.random.permutation(points.shape[0])[: self.point_limit]
-            points = points[indices]
+        if self.voxel_size is not None:
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(points)
+            pcd_down = pcd.voxel_down_sample(self.voxel_size)
+            points = np.asarray(pcd_down.points)
+
+        # if self.point_limit is not None and points.shape[0] > self.point_limit:
+        #     indices = np.random.permutation(points.shape[0])[: self.point_limit]
+        #     points = points[indices]
+            
         return points
 
     def _augment_point_cloud(self, ref_points, src_points, rotation, translation):
@@ -104,6 +113,9 @@ class GeoSegDataset(torch.utils.data.Dataset):
         # metadata
         metadata: Dict = self.metadata_list[index]
         data_dict['scene_name'] = metadata['scene_name']
+        data_dict['ref_frame'] = metadata['frag_id0']
+        data_dict['src_frame'] = metadata['frag_id1']
+        data_dict['overlap'] = metadata['overlap']
 
         # get transformation
         rotation = np.eye(3)
@@ -111,9 +123,11 @@ class GeoSegDataset(torch.utils.data.Dataset):
 
         # get point cloud
         ref_points = self._load_point_cloud(metadata['pcd0'])
-        n_points_sub = ref_points.shape[0] // 3
-        seed_point_idx = self.sampler.choice(ref_points.shape[0], 1)
-        src_points = self._get_patch(ref_points, ref_points[seed_point_idx], n_points_sub)
+        src_points = self._load_point_cloud(metadata['pcd1'])
+
+        # n_points_sub = ref_points.shape[0] // 3
+        # seed_point_idx = self.sampler.choice(ref_points.shape[0], 1)
+        # src_points = self._get_patch(ref_points, ref_points[seed_point_idx], n_points_sub)
              
         # augmentation
         if self.use_augmentation:

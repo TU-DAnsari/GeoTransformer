@@ -1,5 +1,4 @@
 from geotransformer.datasets.registration.threedmatch.dataset_geoseg import GeoSegDataset
-from geotransformer.datasets.registration.threedmatch.dataset import ThreeDMatchPairDataset
 
 from geotransformer.utils.data import (
     registration_collate_fn_stack_mode,
@@ -7,10 +6,12 @@ from geotransformer.utils.data import (
     build_dataloader_stack_mode,
 )
 
+
 def train_valid_data_loader(cfg, distributed):
-    train_dataset = ThreeDMatchPairDataset(
+    train_dataset = GeoSegDataset(
         cfg.data.dataset_root,
         'train',
+        voxel_size=cfg.backbone.init_voxel_size,
         point_limit=cfg.train.point_limit,
         use_augmentation=cfg.train.use_augmentation,
         augmentation_noise=cfg.train.augmentation_noise,
@@ -37,9 +38,10 @@ def train_valid_data_loader(cfg, distributed):
         distributed=distributed,
     )
 
-    valid_dataset = ThreeDMatchPairDataset(
+    valid_dataset = GeoSegDataset(
         cfg.data.dataset_root,
         'val',
+        voxel_size=cfg.backbone.init_voxel_size,
         point_limit=cfg.test.point_limit,
         use_augmentation=False,
         matching_radius=cfg.model.ground_truth_matching_radius,
@@ -61,9 +63,10 @@ def train_valid_data_loader(cfg, distributed):
 
 
 def test_data_loader(cfg, benchmark):
-    train_dataset = ThreeDMatchPairDataset(
+    train_dataset = GeoSegDataset(
         cfg.data.dataset_root,
         'train',
+        voxel_size=cfg.backbone.init_voxel_size,
         point_limit=cfg.train.point_limit,
         use_augmentation=cfg.train.use_augmentation,
         augmentation_noise=cfg.train.augmentation_noise,
@@ -78,9 +81,10 @@ def test_data_loader(cfg, benchmark):
         cfg.backbone.init_radius,
     )
 
-    test_dataset = ThreeDMatchPairDataset(
+    test_dataset = GeoSegDataset(
         cfg.data.dataset_root,
         benchmark,
+        voxel_size=cfg.backbone.init_voxel_size,
         point_limit=cfg.test.point_limit,
         use_augmentation=False,
         matching_radius=cfg.model.ground_truth_matching_radius,

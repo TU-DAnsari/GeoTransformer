@@ -33,12 +33,13 @@ ensure_dir(_C.registration_dir)
 # data
 _C.data = edict()
 _C.data.dataset_root = osp.join("/home/danish/lobster/ml/data", '3DMatch')
+_C.data.max_points = 512
 
 # train data
 _C.train = edict()
 _C.train.batch_size = 1
 _C.train.num_workers = 2
-_C.train.point_limit = 30000
+_C.train.point_limit = 512
 _C.train.use_augmentation = True
 _C.train.augmentation_noise = 0.005
 _C.train.augmentation_rotation = 1.0
@@ -47,7 +48,7 @@ _C.train.augmentation_rotation = 1.0
 _C.test = edict()
 _C.test.batch_size = 1
 _C.test.num_workers = 2
-_C.test.point_limit = 30000
+_C.test.point_limit = 512
 
 # evaluation
 _C.eval = edict()
@@ -57,7 +58,6 @@ _C.eval.inlier_ratio_threshold = 0.05
 _C.eval.rmse_threshold = 0.2
 _C.eval.rre_threshold = 15.0
 _C.eval.rte_threshold = 0.3
-_C.eval.segmentation_radius = 0.05  # same as fine_loss.positive_radius, which the dustbin is trained with
 _C.eval.segmentation_threshold = 0.5
 
 # ransac
@@ -77,8 +77,8 @@ _C.optim.grad_acc_steps = 1
 
 # model - backbone
 _C.backbone = edict()
-_C.backbone.num_stages = 4
-_C.backbone.init_voxel_size = 0.025
+_C.backbone.num_stages = 1  # single resolution: only the neighbors of the input points are precomputed
+_C.backbone.init_voxel_size = 0.1
 _C.backbone.kernel_size = 15
 _C.backbone.base_radius = 2.5
 _C.backbone.base_sigma = 2.0
@@ -92,45 +92,42 @@ _C.backbone.output_dim = 256
 # model - Global
 _C.model = edict()
 _C.model.ground_truth_matching_radius = 0.05
-_C.model.num_points_in_patch = 64
-_C.model.num_sinkhorn_iterations = 100
-
-# model - Coarse Matching
-_C.coarse_matching = edict()
-_C.coarse_matching.num_targets = 128
-_C.coarse_matching.overlap_threshold = 0.1
-_C.coarse_matching.num_correspondences = 256
-_C.coarse_matching.dual_normalization = True
+_C.model.segmentation_radius = 0.1  # a point is overlapping if the other cloud has a point within this radius
 
 # model - GeoTransformer
 _C.geotransformer = edict()
-_C.geotransformer.input_dim = 1024
+_C.geotransformer.input_dim = _C.backbone.output_dim
 _C.geotransformer.hidden_dim = 256
 _C.geotransformer.output_dim = 256
 _C.geotransformer.num_heads = 4
 _C.geotransformer.blocks = ['self', 'cross', 'self', 'cross', 'self', 'cross']
-_C.geotransformer.sigma_d = 0.2
+_C.geotransformer.sigma_d = 0.1
 _C.geotransformer.sigma_a = 15
 _C.geotransformer.angle_k = 3
 _C.geotransformer.reduction_a = 'max'
 
-# loss - Coarse level
-_C.coarse_loss = edict()
-_C.coarse_loss.positive_margin = 0.1
-_C.coarse_loss.negative_margin = 1.4
-_C.coarse_loss.positive_optimal = 0.1
-_C.coarse_loss.negative_optimal = 1.4
-_C.coarse_loss.log_scale = 24
-_C.coarse_loss.positive_overlap = 0.1
+# model - Segmentation head
+_C.seg_head = edict()
+_C.seg_head.hidden_dim = 256
 
-# loss - Fine level
-_C.fine_loss = edict()
-_C.fine_loss.positive_radius = 0.05
+# loss
+_C.seg_loss = edict()
+_C.seg_loss.balanced = True  # weight positives by #neg / #pos per cloud
+
+# loss - point-level circle loss on the transformer features
+_C.circle_loss = edict()
+_C.circle_loss.positive_margin = 0.1
+_C.circle_loss.negative_margin = 1.4
+_C.circle_loss.positive_optimal = 0.1
+_C.circle_loss.negative_optimal = 1.4
+_C.circle_loss.log_scale = 24
+_C.circle_loss.positive_radius = _C.model.segmentation_radius
+_C.circle_loss.negative_radius = 2 * _C.model.segmentation_radius
 
 # loss - Overall
 _C.loss = edict()
-_C.loss.weight_coarse_loss = 1.0
-_C.loss.weight_fine_loss = 1.0
+_C.loss.weight_seg_loss = 1.0
+_C.loss.weight_circle_loss = 1.0
 
 
 def make_cfg():

@@ -1,27 +1,21 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from IPython import embed
 
-from geotransformer.modules.ops import point_to_node_partition, index_select
-from geotransformer.modules.registration import get_node_correspondences
-from geotransformer.modules.sinkhorn import LearnableLogOptimalTransport
-from geotransformer.modules.geotransformer import (
-    GeometricTransformer,
-    SuperPointMatching,
-    SuperPointTargetGenerator,
-)
+from geotransformer.modules.kpconv import UnaryBlock, LastUnaryBlock
+from geotransformer.modules.ops import apply_transform
+from geotransformer.modules.geotransformer import GeometricTransformer
 
-from backbone import KPConvFPN
+from backbone import KPConvBackbone
+from loss import compute_segmentation_labels
 
 
-class GeoTransformer(nn.Module):
+class GeoSeg(nn.Module):
     def __init__(self, cfg):
-        super(GeoTransformer, self).__init__()
-        self.num_points_in_patch = cfg.model.num_points_in_patch
-        self.matching_radius = cfg.model.ground_truth_matching_radius
+        super(GeoSeg, self).__init__()
+        self.segmentation_radius = cfg.model.segmentation_radius
 
-        self.backbone = KPConvFPN(
+        self.backbone = KPConvBackbone(
             cfg.backbone.input_dim,
             cfg.backbone.output_dim,
             cfg.backbone.init_dim,
@@ -43,164 +37,70 @@ class GeoTransformer(nn.Module):
             reduction_a=cfg.geotransformer.reduction_a,
         )
 
-        self.coarse_target = SuperPointTargetGenerator(
-            cfg.coarse_matching.num_targets, cfg.coarse_matching.overlap_threshold
+        # per-point overlap logit from local (backbone) + contextual (transformer) features
+        self.seg_head = nn.Sequential(
+            UnaryBlock(
+                cfg.backbone.output_dim + cfg.geotransformer.output_dim, cfg.seg_head.hidden_dim, cfg.backbone.group_norm
+            ),
+            LastUnaryBlock(cfg.seg_head.hidden_dim, 1),
         )
-
-        self.coarse_matching = SuperPointMatching(
-            cfg.coarse_matching.num_correspondences, cfg.coarse_matching.dual_normalization
-        )
-
-        self.optimal_transport = LearnableLogOptimalTransport(cfg.model.num_sinkhorn_iterations)
 
     def forward(self, data_dict):
         output_dict = {}
 
-        # Downsample point clouds
         feats = data_dict['features'].detach()
         transform = data_dict['transform'].detach()
 
-        ref_length_c = data_dict['lengths'][-1][0].item()
-        ref_length_f = data_dict['lengths'][1][0].item()
         ref_length = data_dict['lengths'][0][0].item()
-        points_c = data_dict['points'][-1].detach()
-        points_f = data_dict['points'][1].detach()
         points = data_dict['points'][0].detach()
-
-        ref_points_c = points_c[:ref_length_c]
-        src_points_c = points_c[ref_length_c:]
-        ref_points_f = points_f[:ref_length_f]
-        src_points_f = points_f[ref_length_f:]
         ref_points = points[:ref_length]
         src_points = points[ref_length:]
 
-        output_dict['ref_points_c'] = ref_points_c
-        output_dict['src_points_c'] = src_points_c
-        output_dict['ref_points_f'] = ref_points_f
-        output_dict['src_points_f'] = src_points_f
         output_dict['ref_points'] = ref_points
         output_dict['src_points'] = src_points
 
-        # 1. Generate ground truth node correspondences
-        _, ref_node_masks, ref_node_knn_indices, ref_node_knn_masks = point_to_node_partition(
-            ref_points_f, ref_points_c, self.num_points_in_patch
-        )
-        _, src_node_masks, src_node_knn_indices, src_node_knn_masks = point_to_node_partition(
-            src_points_f, src_points_c, self.num_points_in_patch
-        )
-
-        ref_padded_points_f = torch.cat([ref_points_f, torch.zeros_like(ref_points_f[:1])], dim=0)
-        src_padded_points_f = torch.cat([src_points_f, torch.zeros_like(src_points_f[:1])], dim=0)
-        ref_node_knn_points = index_select(ref_padded_points_f, ref_node_knn_indices, dim=0)
-        src_node_knn_points = index_select(src_padded_points_f, src_node_knn_indices, dim=0)
-
-        gt_node_corr_indices, gt_node_corr_overlaps = get_node_correspondences(
-            ref_points_c,
-            src_points_c,
-            ref_node_knn_points,
-            src_node_knn_points,
-            transform,
-            self.matching_radius,
-            ref_masks=ref_node_masks,
-            src_masks=src_node_masks,
-            ref_knn_masks=ref_node_knn_masks,
-            src_knn_masks=src_node_knn_masks,
-        )
-
-        output_dict['gt_node_corr_indices'] = gt_node_corr_indices
-        output_dict['gt_node_corr_overlaps'] = gt_node_corr_overlaps
-
-        # 2. KPFCNN Encoder
-        feats_list = self.backbone(feats, data_dict)
-
-        feats_c = feats_list[-1]
-        feats_f = feats_list[0]
-
-        # 3. Conditional Transformer
-        ref_feats_c = feats_c[:ref_length_c]
-        src_feats_c = feats_c[ref_length_c:]
-        ref_feats_c, src_feats_c = self.transformer(
-            ref_points_c.unsqueeze(0),
-            src_points_c.unsqueeze(0),
-            ref_feats_c.unsqueeze(0),
-            src_feats_c.unsqueeze(0),
-        )
-        ref_feats_c_norm = F.normalize(ref_feats_c.squeeze(0), p=2, dim=1)
-        src_feats_c_norm = F.normalize(src_feats_c.squeeze(0), p=2, dim=1)
-
-        output_dict['ref_feats_c'] = ref_feats_c_norm
-        output_dict['src_feats_c'] = src_feats_c_norm
-
-        # 5. Head for fine level matching
-        ref_feats_f = feats_f[:ref_length_f]
-        src_feats_f = feats_f[ref_length_f:]
-        output_dict['ref_feats_f'] = ref_feats_f
-        output_dict['src_feats_f'] = src_feats_f
-
-        # 6. Select topk nearest node correspondences
+        # 1. Ground-truth overlap labels
         with torch.no_grad():
-            ref_node_corr_indices, src_node_corr_indices, node_corr_scores = self.coarse_matching(
-                ref_feats_c_norm, src_feats_c_norm, ref_node_masks, src_node_masks
+            aligned_src_points = apply_transform(src_points, transform)
+            output_dict['ref_labels'] = compute_segmentation_labels(
+                ref_points, aligned_src_points, self.segmentation_radius
+            )
+            output_dict['src_labels'] = compute_segmentation_labels(
+                aligned_src_points, ref_points, self.segmentation_radius
             )
 
-            output_dict['ref_node_corr_indices'] = ref_node_corr_indices
-            output_dict['src_node_corr_indices'] = src_node_corr_indices
+        # 2. KPConv feature extraction
+        feats = self.backbone(feats, data_dict)
+        ref_feats = feats[:ref_length]
+        src_feats = feats[ref_length:]
 
-            # 7 Random select ground truth node correspondences during training
-            if self.training:
-                ref_node_corr_indices, src_node_corr_indices, node_corr_scores = self.coarse_target(
-                    gt_node_corr_indices, gt_node_corr_overlaps
-                )
+        # 3. Geometric self/cross attention over all points
+        ref_feats_t, src_feats_t = self.transformer(
+            ref_points.unsqueeze(0),
+            src_points.unsqueeze(0),
+            ref_feats.unsqueeze(0),
+            src_feats.unsqueeze(0),
+        )
+        ref_feats_t = ref_feats_t.squeeze(0)
+        src_feats_t = src_feats_t.squeeze(0)
 
-        # 7.2 Generate batched node points & feats
-        ref_node_corr_knn_indices = ref_node_knn_indices[ref_node_corr_indices]  # (P, K)
-        src_node_corr_knn_indices = src_node_knn_indices[src_node_corr_indices]  # (P, K)
-        ref_node_corr_knn_masks = ref_node_knn_masks[ref_node_corr_indices]  # (P, K)
-        src_node_corr_knn_masks = src_node_knn_masks[src_node_corr_indices]  # (P, K)
-        ref_node_corr_knn_points = ref_node_knn_points[ref_node_corr_indices]  # (P, K, 3)
-        src_node_corr_knn_points = src_node_knn_points[src_node_corr_indices]  # (P, K, 3)
+        output_dict['ref_feats'] = F.normalize(ref_feats_t, p=2, dim=1)
+        output_dict['src_feats'] = F.normalize(src_feats_t, p=2, dim=1)
 
-        ref_padded_feats_f = torch.cat([ref_feats_f, torch.zeros_like(ref_feats_f[:1])], dim=0)
-        src_padded_feats_f = torch.cat([src_feats_f, torch.zeros_like(src_feats_f[:1])], dim=0)
-        ref_node_corr_knn_feats = index_select(ref_padded_feats_f, ref_node_corr_knn_indices, dim=0)  # (P, K, C)
-        src_node_corr_knn_feats = index_select(src_padded_feats_f, src_node_corr_knn_indices, dim=0)  # (P, K, C)
+        # 4. Per-point segmentation
+        ref_logits = self.seg_head(torch.cat([ref_feats, ref_feats_t], dim=1)).squeeze(1)
+        src_logits = self.seg_head(torch.cat([src_feats, src_feats_t], dim=1)).squeeze(1)
 
-        output_dict['ref_node_corr_knn_points'] = ref_node_corr_knn_points
-        output_dict['src_node_corr_knn_points'] = src_node_corr_knn_points
-        output_dict['ref_node_corr_knn_masks'] = ref_node_corr_knn_masks
-        output_dict['src_node_corr_knn_masks'] = src_node_corr_knn_masks
-
-        # 8. Optimal transport
-        matching_scores = torch.einsum('bnd,bmd->bnm', ref_node_corr_knn_feats, src_node_corr_knn_feats)  # (P, K, K)
-        matching_scores = matching_scores / feats_f.shape[1] ** 0.5
-        matching_scores = self.optimal_transport(matching_scores, ref_node_corr_knn_masks, src_node_corr_knn_masks)
-
-        output_dict['matching_scores'] = matching_scores
-
-        # 9. Per-point matching probability (max over all patch pairs containing the point)
-        with torch.no_grad():
-            match_probs = torch.exp(matching_scores)  # (P, K+1, K+1)
-            ref_patch_probs = 1.0 - match_probs[:, :-1, -1]  # (P, K)
-            src_patch_probs = 1.0 - match_probs[:, -1, :-1]  # (P, K)
-
-            # knn indices use ref_length_f / src_length_f as the padding index, hence the +1 slot
-            ref_match_probs = torch.zeros(ref_length_f + 1, device=matching_scores.device)
-            src_match_probs = torch.zeros(src_points_f.shape[0] + 1, device=matching_scores.device)
-            ref_match_probs.scatter_reduce_(
-                0, ref_node_corr_knn_indices.flatten(), ref_patch_probs.flatten(), reduce='amax'
-            )
-            src_match_probs.scatter_reduce_(
-                0, src_node_corr_knn_indices.flatten(), src_patch_probs.flatten(), reduce='amax'
-            )
-
-            output_dict['ref_match_probs_f'] = ref_match_probs[:-1]  # (N_ref_f,)
-            output_dict['src_match_probs_f'] = src_match_probs[:-1]  # (N_src_f,)
+        output_dict['ref_logits'] = ref_logits
+        output_dict['src_logits'] = src_logits
+        output_dict['ref_probs'] = torch.sigmoid(ref_logits)
+        output_dict['src_probs'] = torch.sigmoid(src_logits)
 
         return output_dict
 
 
 def create_model(config):
-    model = GeoTransformer(config)
+    model = GeoSeg(config)
     return model
 
 
