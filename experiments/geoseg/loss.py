@@ -1,9 +1,7 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from geotransformer.modules.loss import WeightedCircleLoss
-from geotransformer.modules.ops.transformation import apply_transform
 from geotransformer.modules.ops.pairwise_distance import pairwise_distance
 
 
@@ -47,54 +45,35 @@ def compute_segmentation_metrics(probs, labels, threshold=0.5):
     return precision, recall, f1, iou
 
 
-class SegmentationLoss(nn.Module):
+class CoarseMatchingLoss(nn.Module):
     def __init__(self, cfg):
-        super(SegmentationLoss, self).__init__()
-        self.balanced = cfg.seg_loss.balanced
-
-    def _bce(self, logits, labels):
-        labels = labels.float()
-        pos_weight = None
-        if self.balanced:
-            num_pos = labels.sum()
-            num_neg = labels.numel() - num_pos
-            pos_weight = (num_neg / num_pos.clamp(min=1.0)).unsqueeze(0)
-        return F.binary_cross_entropy_with_logits(logits, labels, pos_weight=pos_weight)
+        super(CoarseMatchingLoss, self).__init__()
+        self.weighted_circle_loss = WeightedCircleLoss(
+            cfg.coarse_loss.positive_margin,
+            cfg.coarse_loss.negative_margin,
+            cfg.coarse_loss.positive_optimal,
+            cfg.coarse_loss.negative_optimal,
+            cfg.coarse_loss.log_scale,
+        )
+        self.positive_overlap = cfg.coarse_loss.positive_overlap
 
     def forward(self, output_dict):
-        ref_loss = self._bce(output_dict['ref_logits'], output_dict['ref_labels'])
-        src_loss = self._bce(output_dict['src_logits'], output_dict['src_labels'])
-        return 0.5 * (ref_loss + src_loss)
-
-
-class CircleLoss(nn.Module):
-    def __init__(self, cfg):
-        super(CircleLoss, self).__init__()
-        self.weighted_circle_loss = WeightedCircleLoss(
-            cfg.circle_loss.positive_margin,
-            cfg.circle_loss.negative_margin,
-            cfg.circle_loss.positive_optimal,
-            cfg.circle_loss.negative_optimal,
-            cfg.circle_loss.log_scale,
-        )
-        self.positive_radius = cfg.circle_loss.positive_radius
-        self.negative_radius = cfg.circle_loss.negative_radius
-
-    def forward(self, output_dict, data_dict):
-        ref_points = output_dict['ref_points']
-        src_points = apply_transform(output_dict['src_points'], data_dict['transform'])
         ref_feats = output_dict['ref_feats']
         src_feats = output_dict['src_feats']
-
-        # point pairs closer than positive_radius should match, pairs beyond negative_radius should not;
-        # pairs in between are ambiguous and ignored
-        point_dists = pairwise_distance(ref_points, src_points)  # squared, (N, M)
-        pos_masks = torch.lt(point_dists, self.positive_radius ** 2)
-        neg_masks = torch.gt(point_dists, self.negative_radius ** 2)
+        gt_node_corr_indices = output_dict['gt_node_corr_indices']
+        gt_node_corr_overlaps = output_dict['gt_node_corr_overlaps']
+        gt_ref_node_corr_indices = gt_node_corr_indices[:, 0]
+        gt_src_node_corr_indices = gt_node_corr_indices[:, 1]
 
         feat_dists = torch.sqrt(pairwise_distance(ref_feats, src_feats, normalized=True))
 
-        loss = self.weighted_circle_loss(pos_masks, neg_masks, feat_dists)
+        overlaps = torch.zeros_like(feat_dists)
+        overlaps[gt_ref_node_corr_indices, gt_src_node_corr_indices] = gt_node_corr_overlaps
+        pos_masks = torch.gt(overlaps, self.positive_overlap)
+        neg_masks = torch.eq(overlaps, 0)
+        pos_scales = torch.sqrt(overlaps * pos_masks.float())
+
+        loss = self.weighted_circle_loss(pos_masks, neg_masks, feat_dists, pos_scales)
 
         return loss
 
@@ -102,39 +81,46 @@ class CircleLoss(nn.Module):
 class OverallLoss(nn.Module):
     def __init__(self, cfg):
         super(OverallLoss, self).__init__()
-        self.seg_loss = SegmentationLoss(cfg)
-        self.circle_loss = CircleLoss(cfg)
-        self.weight_seg_loss = cfg.loss.weight_seg_loss
-        self.weight_circle_loss = cfg.loss.weight_circle_loss
+        self.coarse_loss = CoarseMatchingLoss(cfg)
+        self.weight_coarse_loss = cfg.loss.weight_coarse_loss
 
     def forward(self, output_dict, data_dict):
-        seg_loss = self.seg_loss(output_dict)
-        circle_loss = self.circle_loss(output_dict, data_dict)
+        coarse_loss = self.coarse_loss(output_dict)
 
-        loss = self.weight_seg_loss * seg_loss + self.weight_circle_loss * circle_loss
+        loss = self.weight_coarse_loss * coarse_loss
 
         return {
             'loss': loss,
-            's_loss': seg_loss,
-            'c_loss': circle_loss,
+            'c_loss': coarse_loss,
         }
 
 
 class Evaluator(nn.Module):
     def __init__(self, cfg):
         super(Evaluator, self).__init__()
-        self.segmentation_threshold = cfg.eval.segmentation_threshold
+        self.acceptance_overlap = cfg.eval.acceptance_overlap
 
     @torch.no_grad()
-    def forward(self, output_dict, data_dict):
-        result_dict = {}
-        for prefix in ['ref', 'src']:
-            probs = output_dict[f'{prefix}_probs']
-            labels = output_dict[f'{prefix}_labels']
-            precision, recall, f1, iou = compute_segmentation_metrics(probs, labels, self.segmentation_threshold)
-            result_dict[f'{prefix}_P'] = precision
-            result_dict[f'{prefix}_R'] = recall
-            result_dict[f'{prefix}_F1'] = f1
-            result_dict[f'{prefix}_IoU'] = iou
+    def evaluate_coarse(self, output_dict):
+        ref_length_c = output_dict['ref_points'].shape[0]
+        src_length_c = output_dict['src_points'].shape[0]
+        gt_node_corr_overlaps = output_dict['gt_node_corr_overlaps']
+        gt_node_corr_indices = output_dict['gt_node_corr_indices']
+        masks = torch.gt(gt_node_corr_overlaps, self.acceptance_overlap)
+        gt_node_corr_indices = gt_node_corr_indices[masks]
+        gt_ref_node_corr_indices = gt_node_corr_indices[:, 0]
+        gt_src_node_corr_indices = gt_node_corr_indices[:, 1]
+        gt_node_corr_map = torch.zeros(ref_length_c, src_length_c).cuda()
+        gt_node_corr_map[gt_ref_node_corr_indices, gt_src_node_corr_indices] = 1.0
 
-        return result_dict
+        ref_node_corr_indices = output_dict['ref_node_corr_indices']
+        src_node_corr_indices = output_dict['src_node_corr_indices']
+
+        precision = gt_node_corr_map[ref_node_corr_indices, src_node_corr_indices].mean()
+
+        return precision
+
+    def forward(self, output_dict, data_dict):
+        c_precision = self.evaluate_coarse(output_dict)
+
+        return {'PIR': c_precision}

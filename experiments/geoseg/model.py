@@ -2,18 +2,21 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from geotransformer.modules.kpconv import UnaryBlock, LastUnaryBlock
-from geotransformer.modules.ops import apply_transform
-from geotransformer.modules.geotransformer import GeometricTransformer
-
+from geotransformer.modules.ops import point_to_node_partition, index_select
+from geotransformer.modules.registration import get_node_correspondences
+from geotransformer.modules.geotransformer import (
+    GeometricTransformer,
+    SuperPointMatching,
+    SuperPointTargetGenerator,
+)
 from backbone import KPConvBackbone
-from loss import compute_segmentation_labels
 
 
 class GeoSeg(nn.Module):
     def __init__(self, cfg):
         super(GeoSeg, self).__init__()
-        self.segmentation_radius = cfg.model.segmentation_radius
+        self.num_points_in_patch = cfg.model.num_points_in_patch
+        self.matching_radius = cfg.model.ground_truth_matching_radius
 
         self.backbone = KPConvBackbone(
             cfg.backbone.input_dim,
@@ -37,13 +40,14 @@ class GeoSeg(nn.Module):
             reduction_a=cfg.geotransformer.reduction_a,
         )
 
-        # per-point overlap logit from local (backbone) + contextual (transformer) features
-        self.seg_head = nn.Sequential(
-            UnaryBlock(
-                cfg.backbone.output_dim + cfg.geotransformer.output_dim, cfg.seg_head.hidden_dim, cfg.backbone.group_norm
-            ),
-            LastUnaryBlock(cfg.seg_head.hidden_dim, 1),
+        self.coarse_target = SuperPointTargetGenerator(
+            cfg.coarse_matching.num_targets, cfg.coarse_matching.overlap_threshold
         )
+
+        self.coarse_matching = SuperPointMatching(
+            cfg.coarse_matching.num_correspondences, cfg.coarse_matching.dual_normalization
+        )
+
 
     def forward(self, data_dict):
         output_dict = {}
@@ -60,14 +64,33 @@ class GeoSeg(nn.Module):
         output_dict['src_points'] = src_points
 
         # 1. Ground-truth overlap labels
-        with torch.no_grad():
-            aligned_src_points = apply_transform(src_points, transform)
-            output_dict['ref_labels'] = compute_segmentation_labels(
-                ref_points, aligned_src_points, self.segmentation_radius
-            )
-            output_dict['src_labels'] = compute_segmentation_labels(
-                aligned_src_points, ref_points, self.segmentation_radius
-            )
+        _, ref_node_masks, ref_node_knn_indices, ref_node_knn_masks = point_to_node_partition(
+            ref_points, ref_points, self.num_points_in_patch
+        )
+        _, src_node_masks, src_node_knn_indices, src_node_knn_masks = point_to_node_partition(
+            src_points, src_points, self.num_points_in_patch
+        )
+
+        ref_padded_points = torch.cat([ref_points, torch.zeros_like(ref_points[:1])], dim=0)
+        src_padded_points = torch.cat([src_points, torch.zeros_like(src_points[:1])], dim=0)
+        ref_node_knn_points = index_select(ref_padded_points, ref_node_knn_indices, dim=0)
+        src_node_knn_points = index_select(src_padded_points, src_node_knn_indices, dim=0)
+
+        gt_node_corr_indices, gt_node_corr_overlaps = get_node_correspondences(
+            ref_points,
+            src_points,
+            ref_node_knn_points,
+            src_node_knn_points,
+            transform,
+            self.matching_radius,
+            ref_masks=ref_node_masks,
+            src_masks=src_node_masks,
+            ref_knn_masks=ref_node_knn_masks,
+            src_knn_masks=src_node_knn_masks,
+        )
+
+        output_dict['gt_node_corr_indices'] = gt_node_corr_indices
+        output_dict['gt_node_corr_overlaps'] = gt_node_corr_overlaps
 
         # 2. KPConv feature extraction
         feats = self.backbone(feats, data_dict)
@@ -81,20 +104,25 @@ class GeoSeg(nn.Module):
             ref_feats.unsqueeze(0),
             src_feats.unsqueeze(0),
         )
-        ref_feats_t = ref_feats_t.squeeze(0)
-        src_feats_t = src_feats_t.squeeze(0)
+        ref_feats_t_norm = F.normalize(ref_feats_t.squeeze(0), p=2, dim=1)
+        src_feats_t_norm = F.normalize(src_feats_t.squeeze(0), p=2, dim=1)
 
-        output_dict['ref_feats'] = F.normalize(ref_feats_t, p=2, dim=1)
-        output_dict['src_feats'] = F.normalize(src_feats_t, p=2, dim=1)
+        output_dict['ref_feats'] = ref_feats_t_norm
+        output_dict['src_feats'] = src_feats_t_norm
 
-        # 4. Per-point segmentation
-        ref_logits = self.seg_head(torch.cat([ref_feats, ref_feats_t], dim=1)).squeeze(1)
-        src_logits = self.seg_head(torch.cat([src_feats, src_feats_t], dim=1)).squeeze(1)
+        # 4. Superpoint (= point) correspondences from feature matching, used for evaluation
+        with torch.no_grad():
+            ref_node_corr_indices, src_node_corr_indices, node_corr_scores = self.coarse_matching(
+                ref_feats_t_norm, src_feats_t_norm, ref_node_masks, src_node_masks
+            )
 
-        output_dict['ref_logits'] = ref_logits
-        output_dict['src_logits'] = src_logits
-        output_dict['ref_probs'] = torch.sigmoid(ref_logits)
-        output_dict['src_probs'] = torch.sigmoid(src_logits)
+            output_dict['ref_node_corr_indices'] = ref_node_corr_indices
+            output_dict['src_node_corr_indices'] = src_node_corr_indices
+
+            if self.training:
+                ref_node_corr_indices, src_node_corr_indices, node_corr_scores = self.coarse_target(
+                    gt_node_corr_indices, gt_node_corr_overlaps
+                )
 
         return output_dict
 

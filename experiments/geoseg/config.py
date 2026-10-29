@@ -58,7 +58,6 @@ _C.eval.inlier_ratio_threshold = 0.05
 _C.eval.rmse_threshold = 0.2
 _C.eval.rre_threshold = 15.0
 _C.eval.rte_threshold = 0.3
-_C.eval.segmentation_threshold = 0.5
 
 # ransac
 _C.ransac = edict()
@@ -92,7 +91,12 @@ _C.backbone.output_dim = 256
 # model - Global
 _C.model = edict()
 _C.model.ground_truth_matching_radius = 0.05
-_C.model.segmentation_radius = 0.1  # a point is overlapping if the other cloud has a point within this radius
+_C.model.num_points_in_patch = 1  # every point is its own superpoint, so each patch holds only that point
+
+# model - Coarse Matching
+_C.coarse_matching = edict()
+_C.coarse_matching.num_correspondences = 256
+_C.coarse_matching.dual_normalization = True
 
 # model - GeoTransformer
 _C.geotransformer = edict()
@@ -106,28 +110,18 @@ _C.geotransformer.sigma_a = 15
 _C.geotransformer.angle_k = 3
 _C.geotransformer.reduction_a = 'max'
 
-# model - Segmentation head
-_C.seg_head = edict()
-_C.seg_head.hidden_dim = 256
-
-# loss
-_C.seg_loss = edict()
-_C.seg_loss.balanced = True  # weight positives by #neg / #pos per cloud
-
-# loss - point-level circle loss on the transformer features
-_C.circle_loss = edict()
-_C.circle_loss.positive_margin = 0.1
-_C.circle_loss.negative_margin = 1.4
-_C.circle_loss.positive_optimal = 0.1
-_C.circle_loss.negative_optimal = 1.4
-_C.circle_loss.log_scale = 24
-_C.circle_loss.positive_radius = _C.model.segmentation_radius
-_C.circle_loss.negative_radius = 2 * _C.model.segmentation_radius
+# loss - Coarse level
+_C.coarse_loss = edict()
+_C.coarse_loss.positive_margin = 0.1
+_C.coarse_loss.negative_margin = 1.4
+_C.coarse_loss.positive_optimal = 0.1
+_C.coarse_loss.negative_optimal = 1.4
+_C.coarse_loss.log_scale = 24
+_C.coarse_loss.positive_overlap = 0.1
 
 # loss - Overall
 _C.loss = edict()
-_C.loss.weight_seg_loss = 1.0
-_C.loss.weight_circle_loss = 1.0
+_C.loss.weight_coarse_loss = 1.0
 
 
 def make_cfg():
